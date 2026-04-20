@@ -1,0 +1,51 @@
+name: sync-upstream-tags
+
+on:
+  schedule:
+    - cron: "0 3 1 * *"  # 每月 1 日 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync-tags:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/nmwsharp/polyscope.git || true
+
+      - name: Sync missing upstream tags to fork
+        run: |
+          set -euo pipefail
+
+          ORIGIN_TAGS="$(git ls-remote --tags origin | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort)"
+          UPSTREAM_TAGS="$(git ls-remote --tags upstream | grep -v '\^{}' | sed 's|.*refs/tags/||' | sort)"
+
+          if [ -z "$UPSTREAM_TAGS" ]; then
+            echo "No tags found in upstream. Nothing to sync."
+            exit 0
+          fi
+
+          NEW_TAGS="$(comm -23 <(echo "$UPSTREAM_TAGS") <(echo "$ORIGIN_TAGS") || true)"
+
+          if [ -z "$NEW_TAGS" ]; then
+            echo "Fork is already up to date with upstream tags."
+            exit 0
+          fi
+
+          git fetch upstream --tags --force
+
+          PUSHED=0
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            echo "Pushing new tag to fork: $tag"
+            git push origin "refs/tags/$tag:refs/tags/$tag"
+            PUSHED=$((PUSHED + 1))
+          done <<< "$NEW_TAGS"
+
+          echo "Synced $PUSHED new tag(s) to fork."

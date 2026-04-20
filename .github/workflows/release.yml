@@ -1,0 +1,140 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 1 * *"
+
+jobs:
+  resolve-latest-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      should_publish: ${{ steps.resolve.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          fetch-depth: 0
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          LATEST_TAG="$(git tag --sort=-creatordate | head -n1)"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No tags found. Skipping release workflow."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=" >> "$GITHUB_OUTPUT"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TAG_SHA="$(git rev-list -n 1 "$LATEST_TAG")"
+
+          if gh release view "$LATEST_TAG" >/dev/null 2>&1; then
+            echo "Release for $LATEST_TAG already exists. Skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release for $LATEST_TAG does not exist. Publishing."
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$TAG_SHA" >> "$GITHUB_OUTPUT"
+
+  build-package-and-release:
+    needs: resolve-latest-tag
+    if: needs.resolve-latest-tag.outputs.should_publish == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          ref: ${{ needs.resolve-latest-tag.outputs.tag }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Fetch packaging script from fork default branch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $branch = gh api "repos/${{ github.repository }}" --jq ".default_branch"
+          if ([string]::IsNullOrEmpty($branch)) {
+            throw "Could not determine default branch of ${{ github.repository }}"
+          }
+          git fetch origin $branch
+          $scriptDir = "$env:GITHUB_WORKSPACE/scripts"
+          New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
+          $scriptPath = Join-Path $scriptDir "package_dist.ps1"
+          git show "FETCH_HEAD:scripts/package_dist.ps1" | Out-File -LiteralPath $scriptPath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {
+            throw "scripts/package_dist.ps1 not found on branch '$branch' of ${{ github.repository }}"
+          }
+
+      - name: Ensure submodules are at tag-locked revisions
+        run: git submodule update --init --recursive
+
+      - name: Configure
+        run: cmake -S "$env:GITHUB_WORKSPACE" -B "$env:GITHUB_WORKSPACE/build/windows" -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=OFF -DPOLYSCOPE_BACKEND_OPENGL3_EGL=OFF
+
+      - name: Build Debug
+        run: cmake --build "$env:GITHUB_WORKSPACE/build/windows" --config Debug --parallel
+
+      - name: Build Release
+        run: cmake --build "$env:GITHUB_WORKSPACE/build/windows" --config Release --parallel
+
+      - name: Package distribution zip
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE/scripts/package_dist.ps1" `
+            -BuildRoot "$env:GITHUB_WORKSPACE/build/windows" `
+            -OutputRoot "$env:GITHUB_WORKSPACE/dist" `
+            -Tag "${{ needs.resolve-latest-tag.outputs.tag }}" `
+            -CommitSha "${{ needs.resolve-latest-tag.outputs.commit_sha }}"
+
+      - name: Package full source with deps
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.resolve-latest-tag.outputs.tag }}"
+          $sourceDir = "$env:GITHUB_WORKSPACE/dist/polyscope-$tag-source"
+          New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
+          robocopy "$env:GITHUB_WORKSPACE" "$sourceDir" /E /XD .git build dist .github examples example misc scripts test tests doc docs util bin images vcpkg-example
+          $rc = $LASTEXITCODE
+
+          if ($rc -ge 8) {
+            throw "Robocopy failed with code $rc"
+          }
+          # Robocopy 0-7 are success, but can leave LASTEXITCODE non-zero; clear it so the step doesn't fail.
+          $global:LASTEXITCODE = 0
+
+          $zipPath = "$env:GITHUB_WORKSPACE/dist/polyscope-$tag-source-with-deps.zip"
+          Compress-Archive -Path "$sourceDir\*" -DestinationPath $zipPath -CompressionLevel Optimal
+          $shaText = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash + "  polyscope-$tag-source-with-deps.zip"
+          $shaText | Out-File -LiteralPath "$zipPath.sha256" -Encoding utf8
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.resolve-latest-tag.outputs.tag }}"
+          $winZip = "$env:GITHUB_WORKSPACE/dist/polyscope-$tag-windows-lib.zip"
+          $winSha = "$winZip.sha256"
+          $srcZip = "$env:GITHUB_WORKSPACE/dist/polyscope-$tag-source-with-deps.zip"
+          $srcSha = "$srcZip.sha256"
+
+          if (-not (Test-Path -LiteralPath $winZip)) { throw "Missing release asset: $winZip" }
+          if (-not (Test-Path -LiteralPath $winSha)) { throw "Missing checksum asset: $winSha" }
+          if (-not (Test-Path -LiteralPath $srcZip)) { throw "Missing release asset: $srcZip" }
+          if (-not (Test-Path -LiteralPath $srcSha)) { throw "Missing checksum asset: $srcSha" }
+
+          gh release create $tag $winZip $winSha $srcZip $srcSha --title $tag --notes "Automated Windows Debug/Release static library package and full source code with dependencies for $tag."
