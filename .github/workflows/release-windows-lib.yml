@@ -62,6 +62,24 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Checkout default branch tools
+        uses: actions/checkout@v1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: _packaging-tools
+          fetch-depth: 1
+
+      - name: Copy package script from default branch
+        shell: pwsh
+        run: |
+          $source = "$env:GITHUB_WORKSPACE/_packaging-tools/scripts/package_dist.ps1"
+          if (-not (Test-Path -LiteralPath $source)) {
+            throw "Missing packaging script on default branch checkout: $source"
+          }
+          $destDir = "$env:GITHUB_WORKSPACE/scripts"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          Copy-Item -LiteralPath $source -Destination (Join-Path $destDir "package_dist.ps1") -Force
+
       - name: Ensure submodules are at tag-locked revisions
         run: git submodule update --init --recursive
 

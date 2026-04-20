@@ -24,7 +24,21 @@ function Copy-HeadersDirectory {
     throw "Missing header source directory: $Source"
   }
 
-  $extensions = @(".h", ".hpp", ".hh", ".ipp", ".inl")
+  $extensions = @(
+    ".h",
+    ".hpp",
+    ".hh",
+    ".hxx",
+    ".h++",
+    ".ipp",
+    ".inl",
+    ".tpp",
+    ".txx",
+    ".inc",
+    ".ixx",
+    ".cppm",
+    ".mpp"
+  )
   $sourceRoot = (Resolve-Path -LiteralPath $Source).Path
 
   Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | Where-Object {
