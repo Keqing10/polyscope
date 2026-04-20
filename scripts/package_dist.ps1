@@ -94,7 +94,7 @@ function New-ProxyHeaderFile {
   $proxyDir = Split-Path -Path $ProxyPath -Parent
   New-Item -ItemType Directory -Force -Path $proxyDir | Out-Null
   $normalizedTarget = Normalize-IncludePath -PathValue $IncludeTarget
-  Set-Content -LiteralPath $ProxyPath -Encoding ascii -NoNewline -Value @"
+  Set-Content -LiteralPath $ProxyPath -Encoding ascii -Value @"
 #pragma once
 #include "$normalizedTarget"
 "@
@@ -153,17 +153,18 @@ function Ensure-MissingIncludeProxies {
         continue
       }
 
-      $target = $matchingTargets | Sort-Object {
-        (Normalize-IncludePath -PathValue $_.FullName.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/')).Length
-      }, {
-        Normalize-IncludePath -PathValue $_.FullName.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/')
-      } | Select-Object -First 1
+      $target = $matchingTargets | Select-Object *,
+        @{ Name = "RelativeFromIncludeRoot"; Expression = {
+          Normalize-IncludePath -PathValue $_.FullName.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/')
+        } } |
+        Sort-Object { $_.RelativeFromIncludeRoot.Length }, { $_.RelativeFromIncludeRoot } |
+        Select-Object -First 1
 
       $proxyDir = Split-Path -Path $packageCandidate -Parent
       New-Item -ItemType Directory -Force -Path $proxyDir | Out-Null
       $relativeTarget = [System.IO.Path]::GetRelativePath($proxyDir, $target.FullName)
-      if (-not (Normalize-IncludePath -PathValue $relativeTarget).StartsWith(".")) {
-        $relativeTarget = Normalize-IncludePath -PathValue $target.FullName.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/')
+      if ([System.IO.Path]::IsPathRooted($relativeTarget)) {
+        $relativeTarget = $target.RelativeFromIncludeRoot
       }
 
       if (New-ProxyHeaderFile -ProxyPath $packageCandidate -IncludeTarget $relativeTarget) {
