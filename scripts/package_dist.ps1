@@ -52,128 +52,21 @@ function Copy-HeadersDirectory {
   }
 }
 
-function Resolve-HeaderSourceRoot {
+function Copy-HeaderFile {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ModuleRoot
+    [string]$SourceFile,
+    [Parameter(Mandatory = $true)]
+    [string]$DestinationFile
   )
 
-  if (-not (Test-Path -LiteralPath $ModuleRoot)) {
-    throw "Missing module directory: $ModuleRoot"
+  if (-not (Test-Path -LiteralPath $SourceFile)) {
+    throw "Missing header source file: $SourceFile"
   }
 
-  $includeRoot = Join-Path $ModuleRoot "include"
-  if (Test-Path -LiteralPath $includeRoot) {
-    return (Resolve-Path -LiteralPath $includeRoot).Path
-  }
-
-  return (Resolve-Path -LiteralPath $ModuleRoot).Path
-}
-
-function Normalize-IncludePath {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$PathValue
-  )
-
-  return ($PathValue -replace "\\", "/")
-}
-
-function New-ProxyHeaderFile {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$ProxyPath,
-    [Parameter(Mandatory = $true)]
-    [string]$IncludeTarget
-  )
-
-  if (Test-Path -LiteralPath $ProxyPath) {
-    return $false
-  }
-
-  $proxyDir = Split-Path -Path $ProxyPath -Parent
-  New-Item -ItemType Directory -Force -Path $proxyDir | Out-Null
-  $normalizedTarget = Normalize-IncludePath -PathValue $IncludeTarget
-  Set-Content -LiteralPath $ProxyPath -Encoding ascii -Value @"
-#pragma once
-#include "$normalizedTarget"
-"@
-  return $true
-}
-
-function Ensure-MissingIncludeProxies {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string]$IncludeRoot
-  )
-
-  $resolvedIncludeRoot = (Resolve-Path -LiteralPath $IncludeRoot).Path
-  $headerFiles = @(Get-ChildItem -LiteralPath $resolvedIncludeRoot -Recurse -File)
-  $created = @()
-  $includeRegex = '^\s*#\s*include\s*"([^"]+)"'
-  $processedSpecs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-  foreach ($headerFile in $headerFiles) {
-    foreach ($line in Get-Content -LiteralPath $headerFile.FullName) {
-      $match = [System.Text.RegularExpressions.Regex]::Match($line, $includeRegex)
-      if (-not $match.Success) {
-        continue
-      }
-
-      $includeSpec = $match.Groups[1].Value.Trim()
-      if ([string]::IsNullOrWhiteSpace($includeSpec)) {
-        continue
-      }
-
-      $localCandidate = [System.IO.Path]::GetFullPath((Join-Path $headerFile.DirectoryName $includeSpec))
-      if (Test-Path -LiteralPath $localCandidate) {
-        continue
-      }
-
-      $packageCandidate = [System.IO.Path]::GetFullPath((Join-Path $resolvedIncludeRoot $includeSpec))
-      if (Test-Path -LiteralPath $packageCandidate) {
-        continue
-      }
-
-      if (-not $processedSpecs.Add($includeSpec)) {
-        continue
-      }
-
-      $includeLeaf = [System.IO.Path]::GetFileName($includeSpec)
-      if ([string]::IsNullOrWhiteSpace($includeLeaf)) {
-        continue
-      }
-
-      $matchingTargets = @(
-        $headerFiles | Where-Object {
-          $_.Name -ieq $includeLeaf -and $_.FullName -ne $packageCandidate
-        }
-      )
-      if ($matchingTargets.Count -eq 0) {
-        continue
-      }
-
-      $target = $matchingTargets | Select-Object *,
-        @{ Name = "RelativeFromIncludeRoot"; Expression = {
-          Normalize-IncludePath -PathValue $_.FullName.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/')
-        } } |
-        Sort-Object { $_.RelativeFromIncludeRoot.Length }, { $_.RelativeFromIncludeRoot } |
-        Select-Object -First 1
-
-      $proxyDir = Split-Path -Path $packageCandidate -Parent
-      New-Item -ItemType Directory -Force -Path $proxyDir | Out-Null
-      $relativeTarget = [System.IO.Path]::GetRelativePath($proxyDir, $target.FullName)
-      if ([System.IO.Path]::IsPathRooted($relativeTarget)) {
-        $relativeTarget = $target.RelativeFromIncludeRoot
-      }
-
-      if (New-ProxyHeaderFile -ProxyPath $packageCandidate -IncludeTarget $relativeTarget) {
-        $created += (Normalize-IncludePath -PathValue $packageCandidate.Substring($resolvedIncludeRoot.Length).TrimStart('\', '/'))
-      }
-    }
-  }
-
-  return @($created | Sort-Object -Unique)
+  $destinationDir = Split-Path -Path $DestinationFile -Parent
+  New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+  Copy-Item -LiteralPath $SourceFile -Destination $DestinationFile -Force
 }
 
 function Copy-LibsForConfig {
@@ -189,6 +82,8 @@ function Copy-LibsForConfig {
   $allowedLibNames = @(
     "polyscope",
     "imgui",
+    "stb",
+    "glm",
     "glad",
     "glfw",
     "glfw3",
@@ -229,23 +124,14 @@ if (Test-Path -LiteralPath $packageRoot) {
 New-Item -ItemType Directory -Force -Path $includeRoot, $libDebugRoot, $libReleaseRoot | Out-Null
 
 Copy-HeadersDirectory -Source (Join-Path $repoRoot "include/polyscope") -Destination (Join-Path $includeRoot "polyscope")
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/glad")) -Destination $includeRoot
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/glm")) -Destination $includeRoot
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/imgui/imgui")) -Destination (Join-Path $includeRoot "imgui")
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/imgui/implot")) -Destination (Join-Path $includeRoot "implot")
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/imgui/ImGuizmo")) -Destination (Join-Path $includeRoot "ImGuizmo")
-Copy-HeadersDirectory -Source (Resolve-HeaderSourceRoot -ModuleRoot (Join-Path $repoRoot "deps/glfw")) -Destination $includeRoot
-
-$explicitProxies = @(
-  @{ Path = "imgui.h"; Target = "imgui/imgui.h" },
-  @{ Path = "implot.h"; Target = "implot/implot.h" },
-  @{ Path = "ImGuizmo.h"; Target = "ImGuizmo/ImGuizmo.h" }
-)
-foreach ($proxy in $explicitProxies) {
-  New-ProxyHeaderFile -ProxyPath (Join-Path $includeRoot $proxy.Path) -IncludeTarget $proxy.Target | Out-Null
-}
-
-$autoGeneratedProxies = Ensure-MissingIncludeProxies -IncludeRoot $includeRoot
+Copy-HeadersDirectory -Source (Join-Path $repoRoot "deps/glm/glm") -Destination (Join-Path $includeRoot "glm")
+Copy-HeadersDirectory -Source (Join-Path $repoRoot "deps/glad/include/glad") -Destination (Join-Path $includeRoot "glad")
+Copy-HeadersDirectory -Source (Join-Path $repoRoot "deps/glad/include/KHR") -Destination (Join-Path $includeRoot "KHR")
+Copy-HeadersDirectory -Source (Join-Path $repoRoot "deps/glfw/include/GLFW") -Destination (Join-Path $includeRoot "GLFW")
+Copy-HeaderFile -SourceFile (Join-Path $repoRoot "deps/imgui/imgui/imgui.h") -DestinationFile (Join-Path $includeRoot "imgui.h")
+Copy-HeaderFile -SourceFile (Join-Path $repoRoot "deps/imgui/imgui/imconfig.h") -DestinationFile (Join-Path $includeRoot "imconfig.h")
+Copy-HeaderFile -SourceFile (Join-Path $repoRoot "deps/imgui/implot/implot.h") -DestinationFile (Join-Path $includeRoot "implot.h")
+Copy-HeaderFile -SourceFile (Join-Path $repoRoot "deps/imgui/ImGuizmo/ImGuizmo.h") -DestinationFile (Join-Path $includeRoot "ImGuizmo.h")
 
 $debugLibs = Copy-LibsForConfig -BuildDir $resolvedBuildRoot -Config "Debug" -DestinationDir $libDebugRoot
 $releaseLibs = Copy-LibsForConfig -BuildDir $resolvedBuildRoot -Config "Release" -DestinationDir $libReleaseRoot
@@ -256,8 +142,7 @@ $metadata = @(
   "commit=$CommitSha",
   "generated_utc=$(Get-Date -AsUTC -Format o)",
   "debug_libs=$($debugLibs -join ',')",
-  "release_libs=$($releaseLibs -join ',')",
-  "auto_proxies=$($autoGeneratedProxies -join ',')"
+  "release_libs=$($releaseLibs -join ',')"
 )
 Set-Content -LiteralPath $metadataPath -Encoding utf8 -Value $metadata
 
