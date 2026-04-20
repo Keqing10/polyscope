@@ -62,23 +62,23 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Checkout default branch tools
-        uses: actions/checkout@v1
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          path: _packaging-tools
-          fetch-depth: 1
-
-      - name: Copy package script from default branch
+      - name: Fetch packaging script from fork default branch
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $source = "$env:GITHUB_WORKSPACE/_packaging-tools/scripts/package_dist.ps1"
-          if (-not (Test-Path -LiteralPath $source)) {
-            throw "Missing packaging script on default branch checkout: $source"
+          $branch = gh api "repos/${{ github.repository }}" --jq ".default_branch"
+          if ([string]::IsNullOrEmpty($branch)) {
+            throw "Could not determine default branch of ${{ github.repository }}"
           }
-          $destDir = "$env:GITHUB_WORKSPACE/scripts"
-          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-          Copy-Item -LiteralPath $source -Destination (Join-Path $destDir "package_dist.ps1") -Force
+          git fetch origin $branch
+          $scriptDir = "$env:GITHUB_WORKSPACE/scripts"
+          New-Item -ItemType Directory -Force -Path $scriptDir | Out-Null
+          $scriptPath = Join-Path $scriptDir "package_dist.ps1"
+          git show "FETCH_HEAD:scripts/package_dist.ps1" | Out-File -LiteralPath $scriptPath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) {
+            throw "scripts/package_dist.ps1 not found on branch '$branch' of ${{ github.repository }}"
+          }
 
       - name: Ensure submodules are at tag-locked revisions
         run: git submodule update --init --recursive
